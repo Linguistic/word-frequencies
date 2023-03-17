@@ -1,14 +1,15 @@
 import pickle
-
-from concurrent.futures import ThreadPoolExecutor
-from os import path
 import tarfile
+from unicodedata import category
+import dask.dataframe as dd
+
+from os import path
 from pandas import Series, DataFrame
 from alive_progress import alive_bar
 from langdetect import DetectorFactory
 from word_counter.langdetect import create_detector
 from word_counter.subtitles import SubtitleDownloader
-from word_counter.utils import get_out_dir, get_temp_dir, is_alpha
+from word_counter.utils import get_out_dir, get_temp_dir, is_printable
 
 
 class WordCounter:
@@ -19,33 +20,37 @@ class WordCounter:
     language: str
 
     def __init__(self, language: str):
-        self.detector_factory = create_detector(languages=set(["en", language]))
+        self.detector_factory = create_detector(languages=set([language]))
         self.subtitle_downloader = SubtitleDownloader(language=language)
         self.language = language
 
     def _is_valid(self, word: str):
+        """
+        Checks if a given word is valid
+        """
+
         try:
             detector = self.detector_factory.create()
             detector.append(word)
             detected = detector.detect().replace("-", "_")
-            return detected == self.language and is_alpha(word)
+            return detected == self.language and is_printable(word)
         except:
-            return is_alpha(word)
+            return is_printable(word)
 
-    def _count_frequencies(self, subtitles: str):
-        subtitle_words = Series(subtitles.split())
-        word_counts = subtitle_words.value_counts()
-        return DataFrame({"Word": word_counts.index, "Frequency": word_counts.values})
-
-    def _filter_df(
-        self,
-        df: DataFrame,
-        cb: lambda _: bool,
-    ):
-        return df[df["Word"].apply(cb)]
+    def _count_frequencies(self, subtitles: dd.DataFrame):
+        """
+        Groups words by frequency and adds an additional Frequency column
+        """
+        grouped = subtitles.groupby(by="Word").size().reset_index()
+        grouped = grouped.rename(columns={"Words": "Word", 0: "Frequency"})
+        return grouped
 
     def _write_to_pkl(self, df: DataFrame, output_dir: str):
+        """
+        Writes the given DataFrame to a .pkl (Pickle) file in output_dir
+        """
         p = path.join(output_dir, f"{self.language}.pkl")
+
         word_dict = Series(df["Index"].values, index=df["Word"]).to_dict()
 
         with open(p, "wb") as f:
@@ -54,6 +59,9 @@ class WordCounter:
         return p
 
     def _write_to_txt(self, df: DataFrame, output_dir: str):
+        """
+        Writes the given DataFrame to a .txt file in output_dir
+        """
         p = path.join(output_dir, f"{self.language}.txt")
 
         with open(p, "w") as f:
@@ -62,6 +70,9 @@ class WordCounter:
         return p
 
     def _write_to_csv(self, df: DataFrame, output_dir: str):
+        """
+        Writes the given DataFrame to a .csv file in output_dir
+        """
         p = path.join(output_dir, f"{self.language}.csv")
 
         with open(p, "w") as f:
@@ -69,44 +80,41 @@ class WordCounter:
 
         return p
 
+    def _create_archive(self, output_dir: str, files: list[str]):
+        """
+        Creates an archive in output_dir containing the specified files
+        """
+        archive = path.join(output_dir, f"{self.language}.tar.gz")
+
+        with tarfile.open(archive, "w:gz") as tar:
+            for file in files:
+                tar.add(file, arcname=path.basename(file))
+
     def run(self):
         output_dir = get_out_dir()
         tmp_dir = get_temp_dir()
         subtitles = self.subtitle_downloader.get_subtitles(output_dir=tmp_dir)
 
         with alive_bar(title="[WordCounter]", monitor=False, stats=False) as bar:
-            bar.text("Counting word frequencies...")
+            # Group by word frequency
+            ddf = self._count_frequencies(subtitles)
 
-            df = self._count_frequencies(subtitles)
+            # Filter out invalid words
+            ddf = ddf[ddf["Word"].apply(self._is_valid, meta=("Word", "str"))]
 
-            bar.text("Filtering out invalid words...")
+            # Sort by frequency
+            ddf = ddf.sort_values("Frequency", ascending=False)
 
-            df = self._filter_df(df, self._is_valid)
+            # Add sequential index column
+            ddf["Index"] = ddf.reset_index(drop=False).index + 1
 
-            bar.text("Sorting by frequency...")
+            # Compute frequencies
+            df = ddf.compute()
 
-            df = df.sort_values("Frequency", ascending=False)
-
-            bar.text("Adding index...")
-
-            df["Index"] = range(1, len(df) + 1)
-
-            bar.text("Writing to .txt file...")
-
+            # Write output files
             txt = self._write_to_txt(df, tmp_dir)
-
-            bar.text("Writing to .csv file...")
-
             csv = self._write_to_csv(df, tmp_dir)
-
-            bar.text("Writing to .pkl file...")
-
             pkl = self._write_to_pkl(df, tmp_dir)
 
-            bar.text("Compressing to archive...")
-
-            archive = path.join(output_dir, f"{self.language}.tar.gz")
-
-            with tarfile.open(archive, "w:gz") as tar:
-                for file in [txt, csv, pkl]:
-                    tar.add(file, arcname=path.basename(file))
+            # Archive all the files
+            self._create_archive(output_dir, [txt, csv, pkl])

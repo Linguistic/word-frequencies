@@ -1,5 +1,6 @@
 from os import mkdir, path
 from string import punctuation
+from unicodedata import category
 
 
 punc = (
@@ -7,9 +8,20 @@ punc = (
     + punctuation
 )
 
+# https://en.wikipedia.org/wiki/Unicode_character_property#General_Category
+printable_prefixes = [
+    "L",
+    "M",
+    "N",
+    "P",
+]
 
-def is_alpha(word: str):
-    return any(not c.isdigit() and c not in punc for c in word)
+
+def is_printable(word: str):
+    return all(
+        not c.isdigit() and c not in punc and category(c)[0] in printable_prefixes
+        for c in word
+    )
 
 
 def get_temp_dir():

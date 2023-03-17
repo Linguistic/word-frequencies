@@ -1,6 +1,5 @@
 import sys
 
-from os import path, mkdir
 from word_counter.counter import WordCounter
 
 
