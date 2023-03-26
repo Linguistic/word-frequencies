@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+message FrequencyDictionary {
+  string language = 1;
+  map<string, int64> frequency = 2;
+}
